@@ -1,3 +1,4 @@
+import numba as numba
 import numpy as np
 import matplotlib.pyplot as plt
 
@@ -5,6 +6,34 @@ import torch
 from torch import nn
 
 from .runner import FunctionSet
+
+
+@numba.njit
+def _inverse_density_kde_filter(
+    image,
+    out,
+    width,
+    height,
+    kde_width,
+    kde_max_sigma,
+):
+    epsilon = 1.0 / kde_max_sigma
+
+    for y in range(height):
+        for x in range(width):
+            density = image[3, y, x]
+            sigma = 1.0 / (density + epsilon)
+            sigma_squared = sigma ** 2.0
+            for _y in range(-kde_width, kde_width + 1):
+                for _x in range(-kde_width, kde_width + 1):
+                    other_y = y + _y
+                    other_x = x + _x
+                    other_density = image[3, other_y, other_x]
+                    # https://mathworld.wolfram.com/BivariateNormalDistribution.html
+                    # Correlation/covariance is 0
+                    # so p = 0
+                    weight = np.exp((_x ** 2 + _y ** 2) / sigma_squared) / (2.0 * np.pi * sigma_squared)
+                    out[:, y, x] = image[:, other_y, other_x] * weight
 
 
 class Renderer(nn.Module):
@@ -79,13 +108,32 @@ class Renderer(nn.Module):
                 for color, values in enumerate(color_vectors.T):
                     self.raw_image[color][[x_bins, y_bins]] += values
 
+    def kde_blur(self, image, kde_width, kde_max_sigma):  # These should be class attributes...
+        local_image = image.detach().cpu().numpy()
+        filtered_image = np.zeros_like(local_image)
+        _inverse_density_kde_filter(
+            image=local_image,
+            out=filtered_image,
+            width=self.width,
+            height=self.height,
+            kde_width=kde_width,
+            kde_max_sigma=kde_max_sigma
+        )
+        return torch.tensor(filtered_image, dtype=image.dtype, device=image.device)
+
     @torch.no_grad()
-    def pretty_image(self, with_alpha=True):
+    def pretty_image(self, with_alpha=True, kde_width=0.05, kde_max_sigma=10):
         img = self.raw_image + 1
 
         # Log-scale based on alpha
         alpha = img[3:, :, :]
         img = img * torch.log1p(alpha) / alpha
+
+        # Density-inverse KDE bandwidth filtering
+        # Blur each pixel by a gaussian whose std is inversely proportional to the
+        #  density of information at a given pixel
+        # Thus, darker, less-explored regions blur more, sharper details blur less
+        img = self.kde_blur(img, kde_width, kde_max_sigma)
 
         # Gamma correction
         img = torch.pow(img, 1.0 / self.gamma)

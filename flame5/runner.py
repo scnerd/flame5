@@ -67,7 +67,8 @@ class FunctionSet(nn.Module):
                 variation()
                 for variation in np.random.choice(
                     list(Variation.all_variations.values()),
-                    size=num_variations_per_function
+                    size=num_variations_per_function,
+                    replace=False
                 )
             ]
             variation_set = VariationSet(
