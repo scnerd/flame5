@@ -29,6 +29,15 @@ class SimpleTransform(nn.Module):
         padded_x = F.pad(x, [0, 1], 'constant', 1.0)
         return (padded_x @ self.linear)[:, :2]
 
+    def __getstate__(self):
+        return dict(
+            linear=self.linear.detach().cpu().numpy().tolist()
+        )
+
+    def __setstate__(self, state):
+        self.linear = nn.Parameter(torch.tensor(state['linear'], dtype=torch.float32), requires_grad=False)
+        (self.a, self.b, self.c), (self.d, self.e, self.f), _ = torch.t(self.linear).detach().numpy()
+
 
 class RotationTransform(SimpleTransform):
     def __init__(self, angle):

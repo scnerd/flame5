@@ -8,7 +8,7 @@ from torch import nn
 from .runner import FunctionSet
 
 
-@numba.njit
+@numba.njit(parallel=True)
 def _inverse_density_kde_filter(
     image,
     out,
@@ -19,7 +19,7 @@ def _inverse_density_kde_filter(
 ):
     epsilon = 1.0 / kde_max_sigma
 
-    for y in range(height):
+    for y in numba.prange(height):
         for x in range(width):
             density = image[3, y, x]
             sigma = 1.0 / (density + epsilon)
@@ -28,7 +28,7 @@ def _inverse_density_kde_filter(
                 for _x in range(-kde_width, kde_width + 1):
                     other_y = y + _y
                     other_x = x + _x
-                    other_density = image[3, other_y, other_x]
+                    # other_density = image[3, other_y, other_x]
                     # https://mathworld.wolfram.com/BivariateNormalDistribution.html
                     # Correlation/covariance is 0
                     # so p = 0
@@ -44,8 +44,8 @@ class Renderer(nn.Module):
         x_left: float, x_right: float, y_top: float, y_bottom: float,
         palette = plt.get_cmap('viridis'),
         gamma: float = 2.2,
-        initial_sigma: float = 1.0,
-        palette_fidelity: int = 1000
+        initial_sigma: float = 2.0,
+        palette_fidelity: int = 100
     ):
         super().__init__()
 
@@ -62,7 +62,7 @@ class Renderer(nn.Module):
             requires_grad=False
         )
 
-        self.palette = nn.Parameter(torch.tensor([palette(v) for v in np.linspace(0, 1, palette_fidelity)]))
+        self.palette = nn.Parameter(torch.tensor([palette(v) for v in np.linspace(0, 1, palette_fidelity + 1)]))
         self.palette_fidelity = palette_fidelity
         self.gamma = gamma
 
@@ -97,7 +97,12 @@ class Renderer(nn.Module):
             if k >= skip_first_k:
                 xy, colors = points[:, :2], points[:, 2]
                 # color_vectors = torch.tensor(self.palette(colors.detach().cpu().numpy()), dtype=torch.float32).to(device)
-                color_vectors = self.palette[(colors * (self.palette_fidelity - 1) + 0.5 / self.palette_fidelity).long()]
+                # color_vectors = self.palette[(colors * (self.palette_fidelity - 1) + 0.5 / self.palette_fidelity).long()]
+                _colors = colors * self.palette_fidelity
+                _colors_floor = torch.floor(_colors)
+                _colors_ceiling = torch.ceil(_colors)
+                _colors_interp = (_colors - _colors_floor).unsqueeze(1)
+                color_vectors = _colors_interp * self.palette[_colors_ceiling.long()] + (1 - _colors_interp) * self.palette[_colors_floor.long()]
 
                 xy_bins = self.convert_locations_to_bin_indices(xy)
                 x_bins, y_bins = xy_bins.T
@@ -111,23 +116,42 @@ class Renderer(nn.Module):
     def kde_blur(self, image, kde_width, kde_max_sigma):  # These should be class attributes...
         local_image = image.detach().cpu().numpy()
         filtered_image = np.zeros_like(local_image)
+        _, height, width = image.shape
         _inverse_density_kde_filter(
             image=local_image,
             out=filtered_image,
-            width=self.width,
-            height=self.height,
+            width=width,
+            height=height,
             kde_width=kde_width,
             kde_max_sigma=kde_max_sigma
         )
         return torch.tensor(filtered_image, dtype=image.dtype, device=image.device)
 
     @torch.no_grad()
-    def pretty_image(self, with_alpha=True, kde_width=0.05, kde_max_sigma=10):
-        img = self.raw_image + 1
+    def pretty_image(self, with_alpha=True, kde_width=0.05, kde_max_sigma=10, output_shape=None, on_cpu=False):
+        if self.raw_image.max() == 0:
+            if output_shape:
+                shape = output_shape + (3,)
+            else:
+                shape = (self.height, self.width, 3)
+            return np.zeros(shape)
+
+        if on_cpu:
+            img = self.raw_image.cpu()
+        else:
+            img = self.raw_image
+
+        if output_shape:
+            # Averaging results in a smooth result that goes through the nonlinear projections in the same way the original image would have, but with much less cost to render
+            # In particular, the KDE filter is very expensive, and putting a smaller image through it saves a lot of time
+            img = nn.AdaptiveAvgPool2d(output_shape)(img.unsqueeze(0))[0, ...]
+        else:
+            img = torch.clone(img)
+        img += 1
 
         # Log-scale based on alpha
         alpha = img[3:, :, :]
-        img = img * torch.log1p(alpha) / alpha
+        img = img * torch.log(alpha) / alpha
 
         # Density-inverse KDE bandwidth filtering
         # Blur each pixel by a gaussian whose std is inversely proportional to the
@@ -145,3 +169,4 @@ class Renderer(nn.Module):
 
     def heatmap(self):
         return self.raw_image[0, :, :].detach().cpu().numpy()
+

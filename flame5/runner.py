@@ -23,6 +23,12 @@ class Function(nn.Module):
     def forward(self, points):
         return self.variation_set(self.transform(points))
 
+    def __getstate__(self):
+        return dict(
+            transform=self.transform,
+            variation_set=self.variation_set,
+        )
+
 
 class FunctionSet(nn.Module):
     def __init__(self, functions: [Function], probabilities: [float], colors: [torch.Tensor]):
@@ -32,7 +38,7 @@ class FunctionSet(nn.Module):
         probs = torch.tensor(probabilities, dtype=torch.float32)
         self.probabilities = nn.Parameter(probs / probs.sum(), requires_grad=False)
         self.chooser = torch.distributions.Categorical(probs=self.probabilities)
-        self.colors = nn.Parameter(torch.tensor(colors, dtype=torch.float32))
+        self.colors = nn.Parameter(torch.tensor(colors, dtype=torch.float32), requires_grad=False)
 
     def _apply(self, *args, **kwargs):
         result = super()._apply(*args, **kwargs)
@@ -64,7 +70,7 @@ class FunctionSet(nn.Module):
         functions = []
         for _ in range(num_functions):
             variations = [
-                variation()
+                variation(p=list(np.random.randn(variation.num_p)))
                 for variation in np.random.choice(
                     list(Variation.all_variations.values()),
                     size=num_variations_per_function,
@@ -87,6 +93,18 @@ class FunctionSet(nn.Module):
             colors=np.random.uniform(size=num_functions)
         )
 
+    def __getstate__(self):
+        return dict(
+            functions=list(self.functions),
+            probabilities=self.probabilities.detach().cpu().numpy().tolist(),
+            colors=self.colors.detach().cpu().numpy().tolist(),
+        )
+
+    def __setstate__(self, state):
+        self.functions = nn.ModuleList(state['functions'])
+        self.probabilities = nn.Parameter(state['probabilities'], requires_grad=False)
+        self.chooser = torch.distributions.Categorical(probs=self.probabilities)
+        self.colors = nn.Parameter(torch.tensor(state['colors'], dtype=torch.float32), requires_grad=False)
 
 if __name__ == '__main__':
     from . import grid_plot
